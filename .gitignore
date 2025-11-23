@@ -1,0 +1,4 @@
+node_modules
+.env
+*.log
+bot-pubg-fd550-firebase-adminsdk-*.json
