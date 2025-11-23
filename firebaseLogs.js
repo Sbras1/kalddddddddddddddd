@@ -1,143 +1,113 @@
-// ==================================================
-// 🔥 Firebase Logs helper
-// مسؤول عن:
-//  - logOperation(userId, payload)
-//  - getTraderLogs(userId, { type, limit })
-// ==================================================
+// firebaseLogs.js
+// مسئول عن التسجيل في Firebase فقط
 
-require("dotenv").config();
 const admin = require("firebase-admin");
 
 let db = null;
 let firebaseReady = false;
 
 function initFirebase() {
-  if (firebaseReady) return db;
+  if (firebaseReady && db) return db;
 
-  const dbUrl = (process.env.FIREBASE_DB_URL || "").trim();
-  const saPath = (process.env.FIREBASE_SERVICE_ACCOUNT_PATH || "").trim();
+  const dbURL = process.env.FIREBASE_DB_URL;
+  const serviceJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
-  if (!dbUrl || !saPath) {
+  if (!dbURL || !serviceJson) {
     console.warn(
-      "⚠️ Firebase غير مهيّأ: تأكد من FIREBASE_DB_URL و FIREBASE_SERVICE_ACCOUNT_PATH في .env"
+      "⚠️ Firebase غير مهيّأ: تأكد من FIREBASE_DB_URL و FIREBASE_SERVICE_ACCOUNT_JSON في المتغيّرات."
     );
+    firebaseReady = false;
+    return null;
+  }
+
+  let creds;
+  try {
+    creds = JSON.parse(serviceJson);
+  } catch (err) {
+    console.error(
+      "❌ فشل تهيئة Firebase: JSON غير صالح في FIREBASE_SERVICE_ACCOUNT_JSON:",
+      err.message
+    );
+    firebaseReady = false;
     return null;
   }
 
   try {
-    const serviceAccount = require(saPath);
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL: dbUrl,
-    });
-
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(creds),
+        databaseURL: dbURL,
+      });
+    }
     db = admin.database();
     firebaseReady = true;
-    console.log("✅ Firebase Realtime Database جاهز للسجلات.");
+    console.log("✅ Firebase Logs جاهزة للعمل.");
     return db;
   } catch (err) {
     console.error("❌ فشل تهيئة Firebase:", err.message);
+    firebaseReady = false;
     return null;
   }
 }
 
-function getDb() {
-  if (!db) {
-    return initFirebase();
+// تسجيل عملية واحدة
+async function logOperation(userId, data) {
+  const database = initFirebase();
+  if (!database) {
+    console.warn("⚠️ logOperation: Firebase غير متوفر حالياً.");
+    return;
   }
-  return db;
-}
 
-// ==================================================
-// 📝 logOperation
-// يسجل عملية لتاجر معيّن
-// payload: { type, code, player_id, player_name, amount, activated_to, activated_at, result, ... }
-// ==================================================
-async function logOperation(userId, payload) {
   try {
-    const database = getDb();
-    if (!database) {
-      // لا نوقف البوت لو في مشكلة
-      console.warn("⚠️ logOperation: Firebase غير متوفر حالياً.");
-      return;
-    }
-
     const uid = String(userId);
-    const ref = database.ref("logs").child(uid);
+    const ref = database.ref(`logs/${uid}`).push();
+    const time = Date.now();
 
-    const data = {
-      ...payload,
-      time: payload.time || Date.now(),
+    const payload = {
+      time,
+      ...data,
     };
 
-    await ref.push(data);
+    await ref.set(payload);
   } catch (err) {
-    console.error("⚠️ logOperation error:", err.message);
+    console.error("⚠️ logOperation: خطأ أثناء الحفظ في Firebase:", err.message);
   }
 }
 
-// ==================================================
-// 📚 getTraderLogs(userId, { type, limit })
-// يرجع:
-//  { items: [...], stats: { check: n, activate: n, player: n } }
-// ==================================================
+// قراءة سجلات تاجر معيّن مع ترقيم بسيط
 async function getTraderLogs(userId, options = {}) {
-  const typeFilter = options.type || null; // "check" | "activate" | "player" | null
-  const limit = options.limit || 500; // أعلى عدد نسحبه
+  const database = initFirebase();
+  if (!database) {
+    console.warn("⚠️ getTraderLogs: Firebase غير متوفر حالياً.");
+    return { items: [], total: 0 };
+  }
 
-  const result = {
-    items: [],
-    stats: {
-      check: 0,
-      activate: 0,
-      player: 0,
-    },
-  };
+  const uid = String(userId);
+  const page = Number(options.page || 1);
+  const pageSize = Number(options.pageSize || 20);
 
   try {
-    const database = getDb();
-    if (!database) {
-      console.warn("⚠️ getTraderLogs: Firebase غير متوفر.");
-      return result;
-    }
-
-    const uid = String(userId);
-    const ref = database
-      .ref("logs")
-      .child(uid)
+    const snapshot = await database
+      .ref(`logs/${uid}`)
       .orderByChild("time")
-      .limitToLast(limit);
+      .once("value");
 
-    const snap = await ref.once("value");
-    if (!snap.exists()) return result;
+    const raw = snapshot.val() || {};
+    const all = Object.values(raw).sort((a, b) => (a.time || 0) - (b.time || 0));
+    const total = all.length;
 
-    const tmp = [];
-    snap.forEach((child) => {
-      const val = child.val();
-      if (!val || typeof val !== "object") return;
+    // نرجّع من الأحدث إلى الأقدم
+    const start = Math.max(total - page * pageSize, 0);
+    const end = total - (page - 1) * pageSize;
+    const pageItems = all.slice(start, end).reverse();
 
-      const t = val.type || "";
-      if (t === "check") result.stats.check += 1;
-      else if (t === "activate") result.stats.activate += 1;
-      else if (t === "player") result.stats.player += 1;
-
-      tmp.push({ id: child.key, ...val });
-    });
-
-    // من الأحدث للأقدم
-    tmp.sort((a, b) => (b.time || 0) - (a.time || 0));
-
-    if (typeFilter) {
-      result.items = tmp.filter((x) => x.type === typeFilter);
-    } else {
-      result.items = tmp;
-    }
-
-    return result;
+    return {
+      items: pageItems,
+      total,
+    };
   } catch (err) {
-    console.error("⚠️ getTraderLogs error:", err.message);
-    return result;
+    console.error("⚠️ getTraderLogs: خطأ أثناء القراءة من Firebase:", err.message);
+    return { items: [], total: 0 };
   }
 }
 
