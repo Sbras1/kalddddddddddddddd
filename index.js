@@ -104,21 +104,71 @@ function getTraderInfo(userId) {
 
 loadTraders();
 
-// ===================== إنشاء البوت =====================
+// ===================== إنشاء البوت (polling أو webhook على حسب البيئة) =====================
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const WEBHOOK_URL = process.env.WEBHOOK_URL ? String(process.env.WEBHOOK_URL).replace(/\/+$/, "") : null;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+
+let bot;
 let botUsername = null;
 
-bot
-  .getMe()
-  .then((me) => {
-    botUsername = me.username;
-    console.log(`🤖 تم تشغيل البوت: @${botUsername}`);
-    console.log(`🌐 API_BASE_URL = ${API_BASE_URL}`);
-  })
-  .catch((err) => {
-    console.error("❌ فشل getMe:", err.message);
+if (WEBHOOK_URL) {
+  // webhook mode (مناسب لـ Render وبيئات مماثلة حيث يكون هناك عنوان خارجي ثابت)
+  const express = require("express");
+  const bodyParser = require("body-parser");
+  const app = express();
+  app.use(bodyParser.json());
+
+  bot = new TelegramBot(BOT_TOKEN, { polling: false });
+
+  // Telegram سيُرسل التحديثات إلى هذا المسار
+  app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+    try {
+      bot.processUpdate(req.body);
+      res.sendStatus(200);
+    } catch (e) {
+      console.error("Webhook processUpdate error:", e && e.message ? e.message : e);
+      res.sendStatus(500);
+    }
   });
+
+  app.get("/", (req, res) => res.send("OK"));
+
+  app.listen(PORT, async () => {
+    console.log(`Express server listening on port ${PORT}`);
+    try {
+      await bot.setWebHook(`${WEBHOOK_URL}/bot${BOT_TOKEN}`);
+      console.log("✅ Webhook set to", `${WEBHOOK_URL}/bot${BOT_TOKEN}`);
+    } catch (err) {
+      console.error("❌ Failed to set webhook:", err && err.message ? err.message : err);
+    }
+
+    // استدعاء getMe للحصول على اسم البوت
+    bot
+      .getMe()
+      .then((me) => {
+        botUsername = me.username;
+        console.log(`🤖 تم تشغيل البوت (webhook): @${botUsername}`);
+        console.log(`🌐 API_BASE_URL = ${API_BASE_URL}`);
+      })
+      .catch((err) => {
+        console.error("❌ فشل getMe:", err && err.message ? err.message : err);
+      });
+    });
+  } else {
+  // polling mode (مناسب للتشغيل المحلي)
+  bot = new TelegramBot(BOT_TOKEN, { polling: true });
+  bot
+    .getMe()
+    .then((me) => {
+      botUsername = me.username;
+      console.log(`🤖 تم تشغيل البوت: @${botUsername}`);
+      console.log(`🌐 API_BASE_URL = ${API_BASE_URL}`);
+    })
+    .catch((err) => {
+      console.error("❌ فشل getMe:", err && err.message ? err.message : err);
+    });
+  }
 
 // ===================== إدارة الجلسات =====================
 
