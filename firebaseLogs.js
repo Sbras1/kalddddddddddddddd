@@ -1,5 +1,5 @@
 // firebaseLogs.js
-// مسئول عن التسجيل في Firebase فقط
+// مسئول عن التسجيل في Firebase فقط (Realtime Database)
 
 const admin = require("firebase-admin");
 
@@ -36,7 +36,7 @@ function initFirebase() {
     if (!admin.apps.length) {
       admin.initializeApp({
         credential: admin.credential.cert(creds),
-        databaseURL: dbURL,
+        databaseURL: dbURL
       });
     }
     db = admin.database();
@@ -65,7 +65,7 @@ async function logOperation(userId, data) {
 
     const payload = {
       time,
-      ...data,
+      ...data
     };
 
     await ref.set(payload);
@@ -74,7 +74,7 @@ async function logOperation(userId, data) {
   }
 }
 
-// قراءة سجلات تاجر معيّن مع ترقيم بسيط
+// قراءة سجلات تاجر معيّن مع ترقيم بسيط (من الأحدث للأقدم)
 async function getTraderLogs(userId, options = {}) {
   const database = initFirebase();
   if (!database) {
@@ -103,7 +103,7 @@ async function getTraderLogs(userId, options = {}) {
 
     return {
       items: pageItems,
-      total,
+      total
     };
   } catch (err) {
     console.error("⚠️ getTraderLogs: خطأ أثناء القراءة من Firebase:", err.message);
@@ -113,5 +113,5 @@ async function getTraderLogs(userId, options = {}) {
 
 module.exports = {
   logOperation,
-  getTraderLogs,
+  getTraderLogs
 };
