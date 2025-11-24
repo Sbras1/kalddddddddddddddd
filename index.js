@@ -1225,6 +1225,46 @@ bot.on("polling_error", (err) => {
   console.error("Polling error:", err.code || err.message);
   if (err.response && err.response.body) {
     console.error("Polling error body:", err.response.body);
+    try {
+      const body = err.response.body;
+      if (body && body.error_code === 409) {
+        console.error(
+          "⚠️ حصل تعارض 409: يبدو أن هناك عملية أخرى تستخدم getUpdates لنفس البوت. سأتوقف عن الـ polling الآن وأحاول التحويل إلى webhook إن كان `WEBHOOK_URL` مُعرّفاً."
+        );
+
+        // نوقف polling لتفادي رسائل متكررة
+        try {
+          bot.stopPolling();
+          console.log("✅ تم إيقاف polling مؤقتًا.");
+        } catch (e) {}
+
+        // إذا كان webhook مُعرّفًا، نحاول التحويل إليه
+        if (typeof WEBHOOK_URL === "string" && WEBHOOK_URL) {
+          (async () => {
+            try {
+              await bot.setWebHook(`${WEBHOOK_URL}/bot${BOT_TOKEN}`);
+              console.log("✅ تم تعيين webhook تلقائيًا إلى:", `${WEBHOOK_URL}/bot${BOT_TOKEN}`);
+            } catch (e) {
+              console.error("❌ حاولت تعيين webhook تلقائيًا لكن فشل:", e && e.message ? e.message : e);
+              console.error(
+                "أنصح بتعيين WEBHOOK_URL في متغيرات البيئة أو تشغيل البوت عبر webhook على بيئتك (Render).\nإذا لم تكن تريد استخدام webhook، تأكد من تشغيل مثيل واحد فقط للـ polling."
+              );
+            }
+          })();
+        } else {
+          console.error("❌ لا يوجد WEBHOOK_URL مُعرّف؛ إنهاء العملية لتفادي محاولات متكررة.");
+          process.exit(1);
+        }
+      }
+
+      // حالة 401: توكن غير صالح أو مرفوض
+      if (body && body.error_code === 401) {
+        console.error("❌ خطأ 401 Unauthorized: توكن البوت غير صالح أو تم إبطال الوصول.");
+        console.error("تأكد من متغير البيئة BOT_TOKEN وأنه صحيح، أو أعِد توليد توكن جديد عبر @BotFather ثم حدّث المتغير وأعد التشغيل.");
+        // ننهِ العملية لتجنّب لوغ متكرر
+        process.exit(1);
+      }
+    } catch (e) {}
   }
 });
 
