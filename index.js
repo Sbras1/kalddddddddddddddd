@@ -1,5 +1,5 @@
 // ==================================================
-// 🤖 PUBG Trader Bot — Midasbuy + Firebase Logs
+// 🤖 PUBG Trader Bot — Midasbuy + Firebase Logs + Traders + Subscription + Inline
 // ==================================================
 
 require("dotenv").config();
@@ -8,33 +8,33 @@ const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 const { logOperation, getTraderLogs } = require("./firebaseLogs");
 
-// ===================== الإعدادات من المتغيّرات =====================
+// ===================== الإعدادات من .env =====================
 
 const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
 const API_KEY = (process.env.API_KEY || "").trim();
 const OWNER_ID = process.env.OWNER_ID ? Number(process.env.OWNER_ID) : null;
 
-const API_BASE_URL = (process.env.API_BASE_URL || "https://midasbuy-api.com/api/v1/pubg").replace(
-  /\/+$/,
-  ""
-);
-
-// عدد أيام الاشتراك لكل تاجر جديد
-const SUBSCRIPTION_DAYS = Number(process.env.SUBSCRIPTION_DAYS || 30);
+const API_BASE_URL = (
+  process.env.API_BASE_URL || "https://midasbuy-api.com/api/v1/pubg"
+).replace(/\/+$/, "");
 
 if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN غير موجود في المتغيّرات.");
+  console.error("❌ BOT_TOKEN غير موجود في ملف .env");
   process.exit(1);
 }
 if (!API_KEY) {
-  console.error("❌ API_KEY غير موجود في المتغيّرات.");
+  console.error("❌ API_KEY (مفتاح Midasbuy) غير موجود في ملف .env");
   process.exit(1);
 }
-if (!OWNER_ID) {
-  console.warn("⚠️ OWNER_ID غير محدد – يُفضّل إضافته للتحكم بالتجّار.");
+if (!API_BASE_URL) {
+  console.error("❌ API_BASE_URL غير صالح.");
+  process.exit(1);
 }
 
-// ===================== إدارة التجّار =====================
+console.log(`🤖 جاري تشغيل البوت...`);
+console.log(`🌐 API_BASE_URL = ${API_BASE_URL}`);
+
+// ===================== إعداد التجّار =====================
 
 const TRADERS_FILE = "traders.json";
 let traders = {};
@@ -42,133 +42,74 @@ let traders = {};
 function loadTraders() {
   try {
     if (fs.existsSync(TRADERS_FILE)) {
-      const raw = fs.readFileSync(TRADERS_FILE, "utf8");
-      traders = raw ? JSON.parse(raw) : {};
+      const raw = fs.readFileSync(TRADERS_FILE, "utf8").trim();
+      if (!raw) {
+        traders = {};
+      } else {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          if (parsed.traders && typeof parsed.traders === "object") {
+            traders = parsed.traders;
+          } else {
+            traders = parsed;
+          }
+        } else {
+          traders = {};
+        }
+      }
     } else {
       traders = {};
-      fs.writeFileSync(TRADERS_FILE, JSON.stringify(traders, null, 2), "utf8");
+      saveTraders();
     }
   } catch (err) {
     console.error("⚠️ خطأ أثناء تحميل traders.json:", err.message);
     traders = {};
   }
-
-  // تأكد من وجود expiresAt لكل تاجر
-  const now = Date.now();
-  const msPerDay = 24 * 60 * 60 * 1000;
-  for (const [id, info] of Object.entries(traders)) {
-    if (!info.addedAt) {
-      info.addedAt = now;
-    }
-    if (!info.expiresAt) {
-      info.expiresAt = info.addedAt + SUBSCRIPTION_DAYS * msPerDay;
-    }
-  }
-  saveTraders();
 }
 
 function saveTraders() {
   try {
-    fs.writeFileSync(TRADERS_FILE, JSON.stringify(traders, null, 2), "utf8");
+    const data = { traders };
+    fs.writeFileSync(TRADERS_FILE, JSON.stringify(data, null, 2), "utf8");
   } catch (err) {
     console.error("⚠️ خطأ أثناء حفظ traders.json:", err.message);
   }
 }
 
+function isTraderActive(info) {
+  if (!info) return false;
+  if (info.active === false) return false;
+
+  if (info.expiresAt) {
+    return Date.now() < Number(info.expiresAt);
+  }
+  // لو ما في تاريخ انتهاء نعتبره غير نشط إلا لو فعّلت يدوي
+  return false;
+}
+
 function isTrader(userId) {
   if (!userId) return false;
   if (OWNER_ID && Number(userId) === OWNER_ID) return true;
-  const info = traders[userId];
-  if (!info) return false;
-  if (!info.expiresAt) return true; // احتياط
-  return Date.now() <= info.expiresAt;
-}
-
-function getTraderInfo(userId) {
-  const info = traders[userId];
-  if (!info) return null;
-  const addedAt = info.addedAt || Date.now();
-  const expiresAt =
-    info.expiresAt || addedAt + SUBSCRIPTION_DAYS * 24 * 60 * 60 * 1000;
-  const now = Date.now();
-  const isActive = now <= expiresAt;
-  return {
-    id: userId,
-    username: info.username || null,
-    name: info.name || null,
-    addedAt,
-    expiresAt,
-    isActive
-  };
+  const info = traders[String(userId)];
+  return isTraderActive(info);
 }
 
 loadTraders();
 
-// ===================== إنشاء البوت (polling أو webhook على حسب البيئة) =====================
+// ===================== إنشاء البوت =====================
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL ? String(process.env.WEBHOOK_URL).replace(/\/+$/, "") : null;
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
-
-let bot;
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 let botUsername = null;
 
-if (WEBHOOK_URL) {
-  // webhook mode (مناسب لـ Render وبيئات مماثلة حيث يكون هناك عنوان خارجي ثابت)
-  const express = require("express");
-  const bodyParser = require("body-parser");
-  const app = express();
-  app.use(bodyParser.json());
-
-  bot = new TelegramBot(BOT_TOKEN, { polling: false });
-
-  // Telegram سيُرسل التحديثات إلى هذا المسار
-  app.post(`/bot${BOT_TOKEN}`, (req, res) => {
-    try {
-      bot.processUpdate(req.body);
-      res.sendStatus(200);
-    } catch (e) {
-      console.error("Webhook processUpdate error:", e && e.message ? e.message : e);
-      res.sendStatus(500);
-    }
+bot
+  .getMe()
+  .then((me) => {
+    botUsername = me.username;
+    console.log(`✅ تم تشغيل البوت: @${botUsername}`);
+  })
+  .catch((err) => {
+    console.error("⚠️ getMe error:", err.message);
   });
-
-  app.get("/", (req, res) => res.send("OK"));
-
-  app.listen(PORT, async () => {
-    console.log(`Express server listening on port ${PORT}`);
-    try {
-      await bot.setWebHook(`${WEBHOOK_URL}/bot${BOT_TOKEN}`);
-      console.log("✅ Webhook set to", `${WEBHOOK_URL}/bot${BOT_TOKEN}`);
-    } catch (err) {
-      console.error("❌ Failed to set webhook:", err && err.message ? err.message : err);
-    }
-
-    // استدعاء getMe للحصول على اسم البوت
-    bot
-      .getMe()
-      .then((me) => {
-        botUsername = me.username;
-        console.log(`🤖 تم تشغيل البوت (webhook): @${botUsername}`);
-        console.log(`🌐 API_BASE_URL = ${API_BASE_URL}`);
-      })
-      .catch((err) => {
-        console.error("❌ فشل getMe:", err && err.message ? err.message : err);
-      });
-    });
-  } else {
-  // polling mode (مناسب للتشغيل المحلي)
-  bot = new TelegramBot(BOT_TOKEN, { polling: true });
-  bot
-    .getMe()
-    .then((me) => {
-      botUsername = me.username;
-      console.log(`🤖 تم تشغيل البوت: @${botUsername}`);
-      console.log(`🌐 API_BASE_URL = ${API_BASE_URL}`);
-    })
-    .catch((err) => {
-      console.error("❌ فشل getMe:", err && err.message ? err.message : err);
-    });
-  }
 
 // ===================== إدارة الجلسات =====================
 
@@ -202,7 +143,7 @@ function formatDateTimeFromUnix(unixOrMs) {
   const d = new Date(ms);
   return d.toLocaleString("ar-SA", {
     timeZone: "Asia/Riyadh",
-    hour12: true
+    hour12: true,
   });
 }
 
@@ -210,11 +151,44 @@ function formatNow() {
   const d = new Date();
   return d.toLocaleString("ar-SA", {
     timeZone: "Asia/Riyadh",
-    hour12: true
+    hour12: true,
   });
 }
 
-async function apiPost(endpoint, body, label) {
+// توحيد حالة الكود القادمة من API
+function normalizeCodeStatus(rawStatus) {
+  const s = (rawStatus || "").toString().toLowerCase().trim();
+
+  // مفعّل
+  if (["activated", "success", "used", "done"].includes(s)) {
+    return "activated";
+  }
+
+  // غير مفعّل / متاح
+  if (
+    [
+      "unactivated",
+      "unused",
+      "new",
+      "not_activated",
+      "available",
+      "ok",
+      "ready",
+    ].includes(s)
+  ) {
+    return "unactivated";
+  }
+
+  // غير صالح
+  if (["failed", "invalid", "error"].includes(s)) {
+    return "failed";
+  }
+
+  // أي حالة غريبة نعتبره غير مفعّل (أأمن لك)
+  return "unactivated";
+}
+
+async function apiPost(endpoint, body, label = "") {
   const url = `${API_BASE_URL}${endpoint}`;
   console.log(`🔗 ${label || "API"} URL:`, url);
   console.log(`📦 ${label || "API"} body:`, body);
@@ -223,9 +197,9 @@ async function apiPost(endpoint, body, label) {
     headers: {
       "Content-Type": "application/json",
       "X-Api-Key": API_KEY,
-      Accept: "application/json"
+      Accept: "application/json",
     },
-    timeout: 15000
+    timeout: 15000,
   });
 
   return res.data;
@@ -257,7 +231,7 @@ async function activateUcCode(playerId, ucCode) {
   );
 }
 
-// ===================== لوحة المفاتيح الرئيسية =====================
+// ===================== لوحة التحكم الرئيسية =====================
 
 function mainMenuKeyboard() {
   return {
@@ -265,119 +239,23 @@ function mainMenuKeyboard() {
       keyboard: [
         ["🎮 استعلام عن لاعب", "🧪 فحص كود"],
         ["⚡ تفعيل كود", "📒 سجلي"],
-        ["👤 حسابي", "💳 الاشتراك"]
+        ["👤 حسابي", "💳 الاشتراك"],
       ],
       resize_keyboard: true,
-      one_time_keyboard: false
-    }
+      one_time_keyboard: false,
+    },
   };
 }
 
 async function sendMainMenu(chatId) {
-  await bot.sendMessage(chatId, "اختر العملية المطلوبة من القائمة:", mainMenuKeyboard());
-}
-
-// ===================== دوال عرض السجل =====================
-
-async function sendLogsSummary(chatId, userId) {
-  try {
-    const { items, total } = await getTraderLogs(userId, {
-      page: 1,
-      pageSize: 200
-    });
-
-    if (!total || !items || !items.length) {
-      await bot.sendMessage(chatId, "لا يوجد سجلات حتى الآن لهذا الحساب.");
-      return;
-    }
-
-    let countActivate = 0;
-    let countCheck = 0;
-    let countPlayer = 0;
-
-    for (const op of items) {
-      if (!op || !op.type) continue;
-      if (op.type === "activate") countActivate++;
-      else if (op.type === "check") countCheck++;
-      else if (op.type === "player") countPlayer++;
-    }
-
-    const text =
-      "📒 ملخص سجلك:\n\n" +
-      `• عدد عمليات التفعيل: ${countActivate}\n` +
-      `• عدد عمليات فحص الأكواد: ${countCheck}\n` +
-      `• عدد عمليات استعلام اللاعبين: ${countPlayer}\n` +
-      `• إجمالي العمليات المسجلة: ${total}\n\n` +
-      "اختر ما تريد استعراضه بالتفصيل:";
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🔌 استعرض التفعيل", callback_data: "logs:activate:1" }],
-          [{ text: "🧪 استعرض الفحص", callback_data: "logs:check:1" }],
-          [{ text: "🎮 استعرض الاستعلام", callback_data: "logs:player:1" }]
-        ]
-      }
-    };
-
-    await bot.sendMessage(chatId, text, keyboard);
-  } catch (err) {
-    console.error("خطأ sendLogsSummary:", err.message);
-    await bot.sendMessage(
-      chatId,
-      "❌ حدث خطأ أثناء جلب ملخص السجل. جرّب لاحقًا."
-    );
-  }
-}
-
-function buildSubscriptionText() {
-  return (
-    "💳 تفاصيل الاشتراك في بوت التاجر:\n\n" +
-    "• 49 ريال / شهر — تاجر واحد\n" +
-    "  يشمل:\n" +
-    "  – استعلام اللاعبين بالـ ID\n" +
-    "  – فحص أكواد UC\n" +
-    "  – تفعيل الأكواد على حسابات العملاء\n" +
-    "  – عرض سجل عملياتك من داخل البوت\n\n" +
-    "للاشتراك أو الاستفسار:\n" +
-    "• راسل مالك البوت على تيليجرام: @YOUR_USERNAME"
+  await bot.sendMessage(
+    chatId,
+    "مرحبًا 👋\nاختر من القائمة أدناه:",
+    mainMenuKeyboard()
   );
 }
 
-async function sendAccountInfo(chatId, userId) {
-  const info = getTraderInfo(userId);
-  if (!info) {
-    await bot.sendMessage(
-      chatId,
-      "أنت غير مسجّل كتاجر في هذا البوت.\n\n" + buildSubscriptionText()
-    );
-    return;
-  }
-
-  const addedStr = formatDateTimeFromUnix(info.addedAt);
-  const expStr = formatDateTimeFromUnix(info.expiresAt);
-  const now = Date.now();
-  const diffMs = info.expiresAt - now;
-  const daysLeft = Math.max(Math.floor(diffMs / (24 * 60 * 60 * 1000)), 0);
-
-  const statusText = info.isActive ? "✅ مشترك" : "❌ غير مشترك (انتهى الاشتراك)";
-
-  let txt =
-    "👤 حساب التاجر:\n\n" +
-    `• ID: ${info.id}\n`;
-  if (info.username) txt += `• يوزر: ${info.username}\n`;
-  if (info.name) txt += `• الاسم: ${info.name}\n`;
-  txt += `\n• حالة الاشتراك: ${statusText}\n`;
-  txt += `• تاريخ التسجيل: ${addedStr}\n`;
-  txt += `• تاريخ الانتهاء: ${expStr}\n`;
-  if (info.isActive) {
-    txt += `• الأيام المتبقية تقريبًا: ${daysLeft} يوم\n`;
-  }
-
-  await bot.sendMessage(chatId, txt);
-}
-
-// ===================== أوامر إدارة التجّار (للمالك) =====================
+// ===================== إدارة التجّار (أوامر للمالك) =====================
 
 bot.onText(/^\/اضف_تاجر(?:\s+(.+))?$/i, async (msg, match) => {
   const fromId = msg.from.id;
@@ -417,24 +295,29 @@ bot.onText(/^\/اضف_تاجر(?:\s+(.+))?$/i, async (msg, match) => {
   }
 
   const now = Date.now();
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const expiresAt = now + SUBSCRIPTION_DAYS * msPerDay;
+  const durationMs = 30 * 24 * 60 * 60 * 1000; // شهر
+
+  const existing = traders[targetId];
+  const registeredAt = existing?.registeredAt || now;
+  const newExpiresAt = existing?.expiresAt
+    ? Number(existing.expiresAt) + durationMs
+    : now + durationMs;
 
   traders[targetId] = {
     username: targetUsername,
     name: targetName,
-    addedBy: fromId,
-    addedAt: now,
-    expiresAt
+    registeredAt,
+    expiresAt: newExpiresAt,
+    active: true,
   };
   saveTraders();
 
-  let txt =
-    "✅ تم إضافة التاجر بنجاح.\n" +
-    `• ID: ${targetId}\n`;
+  let txt = "✅ تم إضافة/تحديث التاجر.\n";
+  txt += `• ID: ${targetId}\n`;
   if (targetUsername) txt += `• يوزر: ${targetUsername}\n`;
   if (targetName) txt += `• الاسم: ${targetName}\n`;
-  txt += `• الانتهاء بعد: ${SUBSCRIPTION_DAYS} يوم\n`;
+  txt += `• التسجيل: ${formatDateTimeFromUnix(registeredAt)}\n`;
+  txt += `• ينتهي الاشتراك في: ${formatDateTimeFromUnix(newExpiresAt)}\n`;
 
   await bot.sendMessage(chatId, txt);
 });
@@ -498,126 +381,224 @@ bot.onText(/^\/قائمة_التجار$/i, async (msg) => {
   }
 
   let text = `📋 قائمة التجّار (${entries.length}):\n\n`;
-  const now = Date.now();
-
   for (const [id, info] of entries) {
-    const username = info.username || "";
-    const name = info.name || "";
-    const expiresAt = info.expiresAt || 0;
-    const active = !expiresAt || now <= expiresAt;
-    const status = active ? "✅ نشط" : "❌ منتهي";
-
+    const active = isTraderActive(info) ? "✅ نشط" : "⚠️ منتهي/موقوف";
     text += `• ID: ${id}`;
-    if (username) text += ` — ${username}`;
-    if (name) text += ` — ${name}`;
-    text += ` — ${status}\n`;
+    if (info.username) text += ` — ${info.username}`;
+    if (info.name) text += ` — ${info.name}`;
+    text += ` — ${active}\n`;
   }
 
   await bot.sendMessage(chatId, text, { disable_web_page_preview: true });
 });
 
-// ===================== أوامر /start /سجلي /الاشتراك /حسابي =====================
+// ===================== /start & حسابي & الاشتراك =====================
+
+function formatTraderAccount(user, info) {
+  const id = user.id;
+  const name =
+    [user.first_name, user.last_name].filter(Boolean).join(" ") || "غير معروف";
+  const username = user.username ? `@${user.username}` : "غير متوفر";
+
+  let registered = "غير متوفر";
+  let expires = "غير محدد";
+  let subStatus = "غير مشترك";
+
+  if (info) {
+    if (info.registeredAt) {
+      registered = formatDateTimeFromUnix(info.registeredAt);
+    }
+    if (info.expiresAt) {
+      expires = formatDateTimeFromUnix(info.expiresAt);
+    }
+    if (isTraderActive(info)) {
+      subStatus = "مشترك";
+    } else {
+      subStatus = "منتهي / غير نشط";
+    }
+  }
+
+  let txt = "👤 حسابي كتاجر:\n";
+  txt += `• ID: ${id}\n`;
+  txt += `• الاسم: ${name}\n`;
+  txt += `• اليوزر: ${username}\n`;
+  txt += `• تاريخ التسجيل: ${registered}\n`;
+  txt += `• حالة الاشتراك: ${subStatus}\n`;
+  txt += `• تاريخ الانتهاء: ${expires}`;
+
+  return txt;
+}
 
 bot.onText(/^\/start/i, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   resetSession(chatId);
 
+  const info = traders[String(userId)];
+
   if (!isTrader(userId)) {
     const txt =
       "⚠️ هذا البوت مخصص لتجّار شحن PUBG فقط.\n\n" +
       "يمكنك مشاهدة الأزرار، لكن استخدام المزايا يحتاج اشتراك كتاجر.\n\n" +
-      buildSubscriptionText();
+      "للاشتراك أو الاستفسار:\n" +
+      "• راسل مالك البوت على تيليجرام: @YOUR_USERNAME";
     await bot.sendMessage(chatId, txt, mainMenuKeyboard());
     return;
   }
 
   let welcome = "أهلاً بك في بوت تاجر PUBG 💳\n\n";
-  welcome += "يمكنك عبر هذا البوت:\n";
+  welcome += formatTraderAccount(msg.from, info);
+  welcome += "\n\nيمكنك عبر هذا البوت:\n";
   welcome += "• استعلام عن اسم اللاعب عن طريق الـ ID.\n";
   welcome += "• فحص أكواد UC ومعرفة حالتها.\n";
-  welcome += "• تفعيل أكواد UC على حسابات العملاء.\n";
-  welcome += "• متابعة سجل عملياتك.\n\n";
+  welcome += "• تفعيل أكواد UC على حساب اللاعب.\n\n";
   welcome += "اختر العملية من الأزرار بالأسفل.";
 
   await bot.sendMessage(chatId, welcome, mainMenuKeyboard());
 });
+
+bot.onText(/^\/حسابي$/i, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const info = traders[String(userId)];
+
+  if (!info && userId !== OWNER_ID) {
+    return bot.sendMessage(
+      chatId,
+      "⚠️ لست مسجلاً كتاجر بعد.\nتواصل مع مالك البوت للاشتراك."
+    );
+  }
+
+  const text = formatTraderAccount(msg.from, info);
+  await bot.sendMessage(chatId, text);
+});
+
+bot.onText(/^\/الاشتراك$/i, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const txt =
+    "💳 تفاصيل الاشتراك في بوت التاجر:\n\n" +
+    "• 49 ريال / شهر — تاجر واحد\n" +
+    "  يشمل:\n" +
+    "  – استعلام اللاعبين بالـ ID\n" +
+    "  – فحص أكواد UC\n" +
+    "  – تفعيل الأكواد على حسابات العملاء\n" +
+    "  – عرض سجل عملياتك من داخل البوت\n\n" +
+    "للاشتراك أو الاستفسار:\n" +
+    "• راسل مالك البوت على تيليجرام: @YOUR_USERNAME";
+
+  await bot.sendMessage(chatId, txt, { disable_web_page_preview: true });
+});
+
+// ===================== دالة إرسال ملخص سجلي =====================
+
+async function sendLogsSummary(chatId, userId) {
+  const { stats } = await getTraderLogs(userId, { limit: 500 });
+  const text =
+    "📒 ملخص عملياتك:\n\n" +
+    `• عدد استعلامات اللاعبين: ${stats.player}\n` +
+    `• عدد فحوص الأكواد: ${stats.check}\n` +
+    `• عدد تفعيل الأكواد: ${stats.activate}\n\n` +
+    "اختر ما تريد استعراضه:";
+
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "👤 استعراض الاستعلامات", callback_data: "logs:player" }],
+        [{ text: "🧪 استعراض فحوص الأكواد", callback_data: "logs:check" }],
+        [{ text: "⚡ استعراض التفعيل", callback_data: "logs:activate" }],
+      ],
+    },
+  };
+
+  await bot.sendMessage(chatId, text, keyboard);
+}
 
 bot.onText(/^\/سجلي$/i, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
   if (!isTrader(userId)) {
-    const txt =
-      "⚠️ هذا البوت مخصص لتجّار شحن PUBG فقط.\n\n" +
-      "لا يمكنك استخدام هذه الميزة قبل الاشتراك كتاجر.\n\n" +
-      buildSubscriptionText();
-    return bot.sendMessage(chatId, txt);
+    return bot.sendMessage(
+      chatId,
+      "⚠️ هذه الميزة متاحة للتجّار المشتركين فقط.\nتواصل مع مالك البوت للاشتراك."
+    );
   }
 
   await sendLogsSummary(chatId, userId);
 });
 
-bot.onText(/^\/الاشتراك$/i, async (msg) => {
-  const chatId = msg.chat.id;
-  await bot.sendMessage(chatId, buildSubscriptionText(), {
-    disable_web_page_preview: true
-  });
-});
-
-bot.onText(/^\/حسابي$/i, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  await sendAccountInfo(chatId, userId);
-});
-
-// ===================== التعامل مع الرسائل (الأزرار النصية) =====================
+// ===================== التعامل مع الأزرار والرسائل =====================
 
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const text = (msg.text || "").trim();
 
-  // تجاهل الأوامر اللي لها onText خاص
+  // أوامر نصية نعالجها في onText
   if (
     /^\/start/i.test(text) ||
     /^\/سجلي$/i.test(text) ||
     /^\/الاشتراك$/i.test(text) ||
+    /^\/حسابي$/i.test(text) ||
     /^\/اضف_تاجر/i.test(text) ||
     /^\/حذف_تاجر/i.test(text) ||
-    /^\/قائمة_التجار$/i.test(text) ||
-    /^\/حسابي$/i.test(text)
+    /^\/قائمة_التجار$/i.test(text)
   ) {
     return;
   }
 
   const session = getSession(chatId);
 
-  // زر الاشتراك — متاح للجميع
+  // زر الاشتراك — يعمل للجميع
   if (text === "💳 الاشتراك") {
-    await bot.sendMessage(chatId, buildSubscriptionText(), {
-      disable_web_page_preview: true
-    });
+    const txt =
+      "💳 تفاصيل الاشتراك في بوت التاجر:\n\n" +
+      "• 49 ريال / شهر — تاجر واحد\n" +
+      "  يشمل:\n" +
+      "  – استعلام اللاعبين بالـ ID\n" +
+      "  – فحص أكواد UC\n" +
+      "  – تفعيل الأكواد على حسابات العملاء\n" +
+      "  – عرض سجل عملياتك من داخل البوت\n\n" +
+      "للاشتراك أو الاستفسار:\n" +
+      "• راسل مالك البوت على تيليجرام: @YOUR_USERNAME";
+
+    await bot.sendMessage(chatId, txt, { disable_web_page_preview: true });
     return;
   }
 
   // زر حسابي
   if (text === "👤 حسابي") {
-    await sendAccountInfo(chatId, userId);
+    const info = traders[String(userId)];
+    if (!info && userId !== OWNER_ID) {
+      return bot.sendMessage(
+        chatId,
+        "⚠️ لست مسجلاً كتاجر بعد.\nتواصل مع مالك البوت للاشتراك."
+      );
+    }
+    const t = formatTraderAccount(msg.from, info);
+    await bot.sendMessage(chatId, t);
     return;
   }
 
-  // باقي المزايا للتجّار فقط
+  // غير تاجر؟ نرجع رسالة منع
   if (!isTrader(userId)) {
     const txt =
       "⚠️ هذا البوت مخصص لتجّار شحن PUBG فقط.\n\n" +
       "لا يمكنك استخدام هذه الميزة قبل الاشتراك كتاجر.\n\n" +
-      buildSubscriptionText();
+      "للاشتراك أو الاستفسار:\n" +
+      "• راسل مالك البوت على تيليجرام: @YOUR_USERNAME";
     await bot.sendMessage(chatId, txt);
     return;
   }
 
-  // القائمة الرئيسية
+  // زر سجلي
+  if (text === "📒 سجلي") {
+    await sendLogsSummary(chatId, userId);
+    return;
+  }
+
+  // --------- القائمة الرئيسية ----------
   if (text === "🎮 استعلام عن لاعب") {
     session.mode = "WAIT_PLAYER_LOOKUP_ID";
     await bot.sendMessage(
@@ -646,11 +627,6 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  if (text === "📒 سجلي") {
-    await sendLogsSummary(chatId, userId);
-    return;
-  }
-
   // --------- وضع: استعلام عن لاعب ----------
   if (session.mode === "WAIT_PLAYER_LOOKUP_ID") {
     if (!isDigits(text)) {
@@ -675,7 +651,7 @@ bot.on("message", async (msg) => {
           type: "player",
           player_id: playerId,
           player_name: null,
-          result: "not_found"
+          result: "not_found",
         });
       } else {
         const p = data.data;
@@ -690,7 +666,7 @@ bot.on("message", async (msg) => {
           type: "player",
           player_id: p.player_id,
           player_name: p.player_name,
-          result: "success"
+          result: "success",
         });
       }
     } catch (err) {
@@ -699,13 +675,6 @@ bot.on("message", async (msg) => {
         chatId,
         "❌ حدث خطأ أثناء الاستعلام عن اللاعب. جرّب لاحقًا."
       );
-
-      await logOperation(userId, {
-        type: "player",
-        player_id: playerId,
-        player_name: null,
-        result: "error"
-      });
     } finally {
       resetSession(chatId);
       await sendMainMenu(chatId);
@@ -732,22 +701,23 @@ bot.on("message", async (msg) => {
         await logOperation(userId, {
           type: "check",
           code: ucCode,
-          result: "error"
+          result: "error",
         });
       } else {
         const d = data.data;
-        const status = (d.status || "").toLowerCase();
+        console.log("checkCode raw status =", d.status);
+
+        const status = normalizeCodeStatus(d.status);
         const amount = d.amount || "-";
         const activatedTo = d.activated_to || "-";
         const activatedAtStr = d.activated_at
           ? formatDateTimeFromUnix(d.activated_at)
           : "-";
-        const codeValue = d.uc_code || ucCode;
 
         if (status === "activated") {
           const reply =
             "✅ الكود مُفعّل\n" +
-            `• الكود: ${codeValue}\n` +
+            `• الكود: ${d.uc_code}\n` +
             `• الكمية: ${amount} UC\n` +
             `• تم التفعيل على ID: ${activatedTo}\n` +
             `• وقت التفعيل: ${activatedAtStr}\n` +
@@ -757,16 +727,16 @@ bot.on("message", async (msg) => {
 
           await logOperation(userId, {
             type: "check",
-            code: codeValue,
+            code: d.uc_code,
             amount,
             activated_to: activatedTo,
             activated_at: d.activated_at || null,
-            result: "activated"
+            result: "activated",
           });
         } else if (status === "unactivated") {
           const reply =
             "ℹ️ الكود غير مفعّل\n" +
-            `• الكود: ${codeValue}\n` +
+            `• الكود: ${d.uc_code}\n` +
             `• الكمية: ${amount} UC\n` +
             `• وقت الفحص: ${nowStr}`;
 
@@ -774,22 +744,22 @@ bot.on("message", async (msg) => {
 
           await logOperation(userId, {
             type: "check",
-            code: codeValue,
+            code: d.uc_code,
             amount,
-            result: "unactivated"
+            result: "unactivated",
           });
         } else {
           const reply =
             "❌ حالة الكود: غير صالح\n" +
-            `• الكود: ${codeValue}\n` +
+            `• الكود: ${d.uc_code || ucCode}\n` +
             `• وقت الفحص: ${nowStr}`;
 
           await bot.sendMessage(chatId, reply);
 
           await logOperation(userId, {
             type: "check",
-            code: codeValue,
-            result: "failed"
+            code: d.uc_code || ucCode,
+            result: "failed",
           });
         }
       }
@@ -803,7 +773,7 @@ bot.on("message", async (msg) => {
       await logOperation(userId, {
         type: "check",
         code: ucCode,
-        result: "error"
+        result: "error",
       });
     } finally {
       resetSession(chatId);
@@ -868,7 +838,7 @@ bot.on("message", async (msg) => {
     const playerName = session.temp.playerName || "-";
 
     try {
-      await bot.sendMessage(chatId, "⏳ يتم التحقق من حالة الكود قبل التفعيل ...");
+      await bot.sendMessage(chatId, "⏳ يتم تفعيل الكود ...");
 
       // أولاً: فحص الكود قبل التفعيل
       const checkData = await checkUcCode(ucCode);
@@ -884,7 +854,7 @@ bot.on("message", async (msg) => {
           player_id: playerId,
           player_name: playerName,
           code: ucCode,
-          result: "check_error"
+          result: "check_error",
         });
 
         resetSession(chatId);
@@ -893,21 +863,22 @@ bot.on("message", async (msg) => {
       }
 
       const cd = checkData.data;
-      const status = (cd.status || "").toLowerCase();
+      console.log("pre-activate raw status =", cd.status);
+
+      const cStatus = normalizeCodeStatus(cd.status);
       const activatedTo = cd.activated_to || "-";
       const activatedAtStr = cd.activated_at
         ? formatDateTimeFromUnix(cd.activated_at)
         : "-";
-      const codeValue = cd.uc_code || ucCode;
 
-      if (status === "activated") {
+      if (cStatus === "activated") {
         // مفعل مسبقًا — لا نحاول التفعيل مرة أخرى
         const reply =
           "⚠️ الكود مفعل مسبقًا\n" +
           "👤 بيانات اللاعب:\n" +
           `• ID: ${playerId}\n` +
           `• الاسم: ${playerName}\n\n` +
-          `• الكود: ${codeValue}\n` +
+          `• الكود: ${cd.uc_code || ucCode}\n` +
           `• تم التفعيل على ID: ${activatedTo}\n` +
           `• وقت التفعيل: ${activatedAtStr}`;
 
@@ -917,8 +888,8 @@ bot.on("message", async (msg) => {
           type: "activate",
           player_id: playerId,
           player_name: playerName,
-          code: codeValue,
-          result: "already_activated"
+          code: cd.uc_code || ucCode,
+          result: "already_activated",
         });
 
         resetSession(chatId);
@@ -926,11 +897,11 @@ bot.on("message", async (msg) => {
         return;
       }
 
-      if (status !== "unactivated") {
+      if (cStatus === "failed") {
         // حالة غير صالحة — لا نحاول التفعيل
         const reply =
           "❌ لا يمكن تفعيل هذا الكود\n" +
-          `• الكود: ${codeValue}`;
+          `• الكود: ${cd.uc_code || ucCode}`;
 
         await bot.sendMessage(chatId, reply);
 
@@ -938,8 +909,8 @@ bot.on("message", async (msg) => {
           type: "activate",
           player_id: playerId,
           player_name: playerName,
-          code: codeValue,
-          result: "invalid_before_activate"
+          code: cd.uc_code || ucCode,
+          result: "invalid_before_activate",
         });
 
         resetSession(chatId);
@@ -948,7 +919,6 @@ bot.on("message", async (msg) => {
       }
 
       // هنا الكود غير مفعّل — نحاول التفعيل فعليًا
-      await bot.sendMessage(chatId, "⏳ يتم تفعيل الكود ...");
       const actData = await activateUcCode(playerId, ucCode);
 
       if (actData && actData.success) {
@@ -966,7 +936,7 @@ bot.on("message", async (msg) => {
           player_id: playerId,
           player_name: playerName,
           code: ucCode,
-          result: "success"
+          result: "success",
         });
       } else {
         const reply =
@@ -983,7 +953,7 @@ bot.on("message", async (msg) => {
           player_id: playerId,
           player_name: playerName,
           code: ucCode,
-          result: "failed"
+          result: "failed",
         });
       }
     } catch (err) {
@@ -998,7 +968,7 @@ bot.on("message", async (msg) => {
         player_id: playerId,
         player_name: playerName,
         code: ucCode,
-        result: "error"
+        result: "error",
       });
     } finally {
       resetSession(chatId);
@@ -1014,258 +984,182 @@ bot.on("message", async (msg) => {
   }
 });
 
-// ===================== Inline Mode: استعلام سريع + فحص كود =====================
+// ===================== عرض السجلات من الأزرار (callback_query) =====================
 
-bot.on("inline_query", async (query) => {
-  try {
-    const inlineId = query.id;
-    const userId = query.from.id;
-    const q = (query.query || "").trim();
+bot.on("callback_query", async (query) => {
+  const data = query.data || "";
+  const chatId = query.message?.chat?.id;
+  const userId = query.from?.id;
 
-    console.log("🔍 inline_query from", userId, ":", q || "(empty)");
+  if (!chatId || !userId) return;
 
-    // لا نسمح إلا للتجّار باستخدام inline
-    if (!isTrader(userId)) {
-      return bot.answerInlineQuery(inlineId, [], { cache_time: 5 });
+  if (data.startsWith("logs:")) {
+    const type = data.split(":")[1]; // player | check | activate
+
+    const { items } = await getTraderLogs(userId, {
+      type,
+      limit: 20,
+    });
+
+    if (!items.length) {
+      await bot.answerCallbackQuery(query.id, {
+        text: "لا توجد سجلات لهذا النوع.",
+        show_alert: true,
+      });
+      return;
     }
 
-    if (!q) {
-      // لا يوجد نص، لا نرجع شيء
-      return bot.answerInlineQuery(inlineId, [], { cache_time: 5 });
-    }
+    let title = "";
+    if (type === "player") title = "👤 استعلامات اللاعبين:";
+    else if (type === "check") title = "🧪 فحوص الأكواد:";
+    else if (type === "activate") title = "⚡ عمليات التفعيل:";
 
-    const results = [];
+    let text = title + "\n\n";
 
-    // لو أرقام فقط => استعلام لاعب
-    if (isDigits(q)) {
-      const playerId = q;
+    const slice = items.slice(0, 10); // آخر 10 فقط
 
-      try {
-        const data = await getPlayerInfo(playerId);
-        if (data.success && data.data && data.data.status === "success") {
-          const p = data.data;
-
-          const title = `👤 ${p.player_name}`;
-          const desc = `ID: ${p.player_id}`;
-          const text =
-            "👤 بيانات اللاعب:\n" +
-            `• ID: ${p.player_id}\n` +
-            `• الاسم: ${p.player_name}\n\n` +
-            "يمكنك استخدام زر ⚡ تفعيل كود من البوت لتفعيل كود لهذا اللاعب.";
-
-          results.push({
-            type: "article",
-            id: `player-${p.player_id}`,
-            title,
-            description: desc,
-            input_message_content: {
-              message_text: text
-            }
-          });
-
-          await logOperation(userId, {
-            type: "player",
-            player_id: p.player_id,
-            player_name: p.player_name,
-            result: "success_inline"
-          });
-        }
-      } catch (err) {
-        console.error("خطأ inline getPlayer:", err.message);
-      }
-    } else if (/^[A-Za-z0-9]{8,}$/.test(q)) {
-      // احتمال أنه UC code
-      const ucCode = q;
-
-      try {
-        const data = await checkUcCode(ucCode);
-        if (data.success && data.data) {
-          const d = data.data;
-          const status = (d.status || "").toLowerCase();
-          const amount = d.amount || "-";
-          const codeValue = d.uc_code || ucCode;
-          let statusText = "";
-          let icon = "";
-
-          if (status === "activated") {
-            icon = "✅";
-            statusText = "الكود مُفعّل";
-          } else if (status === "unactivated") {
-            icon = "ℹ️";
-            statusText = "الكود غير مفعّل";
-          } else {
-            icon = "❌";
-            statusText = "الكود غير صالح";
-          }
-
-          const title = `${icon} ${statusText}`;
-          const desc = `الكود: ${codeValue} — الكمية: ${amount} UC`;
-          const text =
-            `${icon} ${statusText}\n` +
-            `• الكود: ${codeValue}\n` +
-            `• الكمية: ${amount} UC`;
-
-          results.push({
-            type: "article",
-            id: `code-${codeValue}`,
-            title,
-            description: desc,
-            input_message_content: {
-              message_text: text
-            }
-          });
-
-          await logOperation(userId, {
-            type: "check",
-            code: codeValue,
-            amount,
-            result: status || "unknown_inline"
-          });
-        }
-      } catch (err) {
-        console.error("خطأ inline checkCode:", err.message);
+    for (const op of slice) {
+      const when = formatDateTimeFromUnix(op.time);
+      if (type === "player") {
+        text += `• ${op.player_name || "-"} (${op.player_id || "-"})\n  في: ${when}\n\n`;
+      } else if (type === "check") {
+        text += `• كود: ${op.code || "-"} — (${op.result || "-"})\n  في: ${when}\n\n`;
+      } else if (type === "activate") {
+        text += `• كود: ${op.code || "-"} — (${op.result || "-"})\n  لاعب: ${op.player_name || "-"} (${op.player_id || "-"})\n  في: ${when}\n\n`;
       }
     }
 
-    await bot.answerInlineQuery(inlineId, results, { cache_time: 3 });
-  } catch (err) {
-    console.error("خطأ عام في inline_query:", err.message);
+    await bot.sendMessage(chatId, text, { disable_web_page_preview: true });
+    await bot.answerCallbackQuery(query.id);
   }
 });
 
-// ===================== استعراض السجلات بالتفصيل (Callback) =====================
+// ===================== Inline mode (استعلام + فحص داخل القروبات) =====================
 
-bot.on("callback_query", async (query) => {
+bot.on("inline_query", async (iq) => {
+  const q = (iq.query || "").trim();
+  const fromId = iq.from.id;
+
+  console.log(
+    "🔍 inline_query from",
+    fromId,
+    ":",
+    q.length ? q : "(empty)"
+  );
+
+  // لو ما كتب شيء، لا نرجع نتائج
+  if (!q) {
+    return bot.answerInlineQuery(iq.id, [], { cache_time: 0 });
+  }
+
+  const results = [];
+
   try {
-    const data = query.data || "";
-    const chatId = query.message?.chat?.id;
-    const userId = query.from?.id;
+    // أرقام فقط → استعلام لاعب
+    if (isDigits(q)) {
+      const playerId = q;
+      const data = await getPlayerInfo(playerId);
 
-    if (!chatId || !userId) return;
+      if (data.success && data.data && data.data.status === "success") {
+        const p = data.data;
 
-    if (data.startsWith("logs:")) {
-      const parts = data.split(":"); // [ "logs", "activate", "1" ]
-      const logType = parts[1]; // "activate" | "check" | "player"
-      const page = Number(parts[2] || "1") || 1;
+        const title = `${p.player_name} — ${p.player_id}`;
+        const desc = "عرض بيانات اللاعب";
 
-      const pageSize = 10;
-      const { items } = await getTraderLogs(userId, {
-        page,
-        pageSize
-      });
+        const text =
+          "👤 بيانات اللاعب:\n" +
+          `• ID: ${p.player_id}\n` +
+          `• الاسم: ${p.player_name}\n\n` +
+          "للتفعيل لهذا اللاعب استخدم زر ⚡ تفعيل كود في الخاص مع البوت.";
 
-      if (!items || !items.length) {
-        await bot.answerCallbackQuery(query.id, {
-          text: "لا يوجد سجلات في هذه الصفحة.",
-          show_alert: true
+        results.push({
+          type: "article",
+          id: "player-" + p.player_id,
+          title,
+          description: desc,
+          input_message_content: {
+            message_text: text,
+          },
         });
-        return;
-      }
 
-      const filtered = items.filter((op) => op && op.type === logType);
-      if (!filtered.length) {
-        await bot.answerCallbackQuery(query.id, {
-          text: "لا يوجد سجلات من هذا النوع في هذه الصفحة.",
-          show_alert: true
+        await logOperation(fromId, {
+          type: "player",
+          player_id: p.player_id,
+          player_name: p.player_name,
+          result: "success_inline",
         });
-        return;
       }
+    } else if (q.length >= 6) {
+      // غير أرقام بالكامل → نفترض كود UC
+      const ucCode = q;
+      const data = await checkUcCode(ucCode);
+      const nowStr = formatNow();
 
-      let title = "";
-      if (logType === "activate") title = "🔌 سجل التفعيل";
-      else if (logType === "check") title = "🧪 سجل فحص الأكواد";
-      else if (logType === "player") title = "🎮 سجل استعلام اللاعبين";
-      else title = "📒 السجل";
+      if (data.success && data.data) {
+        const d = data.data;
+        console.log("inline checkCode raw status =", d.status);
 
-      let text = `${title} (صفحة ${page}):\n\n`;
+        const status = normalizeCodeStatus(d.status);
+        const amount = d.amount || "-";
 
-      for (const op of filtered) {
-        const when = formatDateTimeFromUnix(op.time);
-        if (logType === "activate") {
-          text +=
-            `• كود: ${op.code || "-"}\n` +
-            `  لاعب: ${op.player_name || "-"} (${op.player_id || "-"})\n` +
-            `  نتيجة: ${op.result || "-"}\n` +
-            `  في: ${when}\n\n`;
-        } else if (logType === "check") {
-          text +=
-            `• كود: ${op.code || "-"}\n` +
-            `  نتيجة: ${op.result || "-"}\n` +
-            `  في: ${when}\n\n`;
-        } else if (logType === "player") {
-          text +=
-            `• لاعب: ${op.player_name || "-"} (${op.player_id || "-"})\n` +
-            `  نتيجة: ${op.result || "-"}\n` +
-            `  في: ${when}\n\n`;
+        let title = "";
+        let desc = "";
+        let text = "";
+
+        if (status === "activated") {
+          title = "✅ الكود مُفعّل";
+          desc = `كود: ${d.uc_code} — ${amount} UC`;
+          text =
+            "✅ الكود مُفعّل\n" +
+            `• الكود: ${d.uc_code}\n` +
+            `• الكمية: ${amount} UC\n` +
+            `• وقت الفحص: ${nowStr}`;
+        } else if (status === "unactivated") {
+          title = "ℹ️ الكود غير مفعّل";
+          desc = `كود: ${d.uc_code} — ${amount} UC`;
+          text =
+            "ℹ️ الكود غير مفعّل\n" +
+            `• الكود: ${d.uc_code}\n` +
+            `• الكمية: ${amount} UC\n` +
+            `• وقت الفحص: ${nowStr}`;
+        } else {
+          title = "❌ الكود غير صالح";
+          desc = `كود: ${d.uc_code || ucCode}`;
+          text =
+            "❌ حالة الكود: غير صالح\n" +
+            `• الكود: ${d.uc_code || ucCode}\n` +
+            `• وقت الفحص: ${nowStr}`;
         }
+
+        results.push({
+          type: "article",
+          id: "code-" + ucCode,
+          title,
+          description: desc,
+          input_message_content: {
+            message_text: text,
+          },
+        });
+
+        await logOperation(fromId, {
+          type: "check",
+          code: d.uc_code || ucCode,
+          amount,
+          result: status,
+        });
       }
-
-      await bot.editMessageText(text, {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        disable_web_page_preview: true
-      });
-
-      await bot.answerCallbackQuery(query.id);
     }
   } catch (err) {
-    console.error("خطأ في callback_query:", err.message);
-    try {
-      await bot.answerCallbackQuery(query.id, {
-        text: "حدث خطأ أثناء معالجة الطلب.",
-        show_alert: true
-      });
-    } catch (e) {}
+    console.error("inline_query error:", err.message);
   }
+
+  await bot.answerInlineQuery(iq.id, results, { cache_time: 0 });
 });
 
 // ===================== التعامل مع أخطاء polling =====================
 
 bot.on("polling_error", (err) => {
   console.error("Polling error:", err.code || err.message);
-  if (err.response && err.response.body) {
-    console.error("Polling error body:", err.response.body);
-    try {
-      const body = err.response.body;
-      if (body && body.error_code === 409) {
-        console.error(
-          "⚠️ حصل تعارض 409: يبدو أن هناك عملية أخرى تستخدم getUpdates لنفس البوت. سأتوقف عن الـ polling الآن وأحاول التحويل إلى webhook إن كان `WEBHOOK_URL` مُعرّفاً."
-        );
-
-        // نوقف polling لتفادي رسائل متكررة
-        try {
-          bot.stopPolling();
-          console.log("✅ تم إيقاف polling مؤقتًا.");
-        } catch (e) {}
-
-        // إذا كان webhook مُعرّفًا، نحاول التحويل إليه
-        if (typeof WEBHOOK_URL === "string" && WEBHOOK_URL) {
-          (async () => {
-            try {
-              await bot.setWebHook(`${WEBHOOK_URL}/bot${BOT_TOKEN}`);
-              console.log("✅ تم تعيين webhook تلقائيًا إلى:", `${WEBHOOK_URL}/bot${BOT_TOKEN}`);
-            } catch (e) {
-              console.error("❌ حاولت تعيين webhook تلقائيًا لكن فشل:", e && e.message ? e.message : e);
-              console.error(
-                "أنصح بتعيين WEBHOOK_URL في متغيرات البيئة أو تشغيل البوت عبر webhook على بيئتك (Render).\nإذا لم تكن تريد استخدام webhook، تأكد من تشغيل مثيل واحد فقط للـ polling."
-              );
-            }
-          })();
-        } else {
-          console.error("❌ لا يوجد WEBHOOK_URL مُعرّف؛ إنهاء العملية لتفادي محاولات متكررة.");
-          process.exit(1);
-        }
-      }
-
-      // حالة 401: توكن غير صالح أو مرفوض
-      if (body && body.error_code === 401) {
-        console.error("❌ خطأ 401 Unauthorized: توكن البوت غير صالح أو تم إبطال الوصول.");
-        console.error("تأكد من متغير البيئة BOT_TOKEN وأنه صحيح، أو أعِد توليد توكن جديد عبر @BotFather ثم حدّث المتغير وأعد التشغيل.");
-        // ننهِ العملية لتجنّب لوغ متكرر
-        process.exit(1);
-      }
-    } catch (e) {}
-  }
 });
 
 process.on("unhandledRejection", (reason) => {
