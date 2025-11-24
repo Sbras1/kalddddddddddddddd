@@ -2,3 +2,4 @@ node_modules
 .env
 *.log
 bot-pubg-fd550-firebase-adminsdk-*.json
+FIREBASE_SERVICE_ACCOUNT_JSON
