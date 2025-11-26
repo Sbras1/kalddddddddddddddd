@@ -119,57 +119,65 @@ async function logOperation(userId, data) {
     console.warn("⚠️ logOperation: Firebase غير متوفر حالياً.");
     return;
   }
-
   try {
-    const uid = String(userId);
-    const ref = database.ref(`logs/${uid}`).push();
     const time = Date.now();
-
-    const payload = {
-      time,
-      ...data
-    };
-
-    await ref.set(payload);
+    await database.ref(`logs/${userId}`).push({ ...data, time });
+    return true;
   } catch (err) {
-    console.error("⚠️ logOperation: خطأ أثناء الحفظ في Firebase:", err.message);
+    console.error("⚠️ logOperation: خطأ أثناء التسجيل في Firebase:", err.message || err);
+    return false;
   }
 }
 
-// قراءة سجلات تاجر معيّن مع ترقيم بسيط (من الأحدث للأقدم)
+// قراءة سجلات تاجر معيّن مع خيارات limit وtype وإحصائيات
 async function getTraderLogs(userId, options = {}) {
   const database = initFirebase();
   if (!database) {
     console.warn("⚠️ getTraderLogs: Firebase غير متوفر حالياً.");
-    return { items: [], total: 0 };
+    return { items: [], total: 0, stats: { player: 0, check: 0, activate: 0 } };
   }
 
   const uid = String(userId);
+  const limit = options.limit ? Number(options.limit) : null;
   const page = Number(options.page || 1);
   const pageSize = Number(options.pageSize || 20);
 
   try {
-    const snapshot = await database
-      .ref(`logs/${uid}`)
-      .orderByChild("time")
-      .once("value");
-
+    const snapshot = await database.ref(`logs/${uid}`).orderByChild("time").once("value");
     const raw = snapshot.val() || {};
+    // السجلات مرتبة من الأقدم إلى الأحدث
     const all = Object.values(raw).sort((a, b) => (a.time || 0) - (b.time || 0));
-    const total = all.length;
 
-    // نرجّع من الأحدث إلى الأقدم
-    const start = Math.max(total - page * pageSize, 0);
-    const end = total - (page - 1) * pageSize;
-    const pageItems = all.slice(start, end).reverse();
+    // احصائيات لكل نوع سجل
+    const stats = { player: 0, check: 0, activate: 0 };
+    for (const log of all) {
+      if (log.type && stats.hasOwnProperty(log.type)) {
+        stats[log.type]++;
+      }
+    }
 
-    return {
-      items: pageItems,
-      total
-    };
+    // فلترة السجلات حسب نوع العملية إن لزم
+    let filtered = all;
+    if (options.type) {
+      filtered = all.filter((log) => log.type === options.type);
+    }
+
+    // تحديد عدد العناصر المعادة
+    let items;
+    if (limit) {
+      const start = Math.max(filtered.length - limit, 0);
+      items = filtered.slice(start).reverse();
+    } else {
+      const total = filtered.length;
+      const start = Math.max(total - page * pageSize, 0);
+      const end = total - (page - 1) * pageSize;
+      items = filtered.slice(start, end).reverse();
+    }
+
+    return { items, total: filtered.length, stats };
   } catch (err) {
     console.error("⚠️ getTraderLogs: خطأ أثناء القراءة من Firebase:", err.message);
-    return { items: [], total: 0 };
+    return { items: [], total: 0, stats: { player: 0, check: 0, activate: 0 } };
   }
 }
 
