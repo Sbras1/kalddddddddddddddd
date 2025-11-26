@@ -418,7 +418,7 @@ function formatTraderAccount(user, info) {
     }
   }
 
-  let txt = "👤 حسابي كتاجر:\n";
+  let txt = "👤 حسابي :\n";
   txt += `• ID: ${id}\n`;
   txt += `• الاسم: ${name}\n`;
   txt += `• اليوزر: ${username}\n`;
