@@ -1008,12 +1008,22 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    let title = "";
-    if (type === "player") title = "👤 استعلامات اللاعبين:";
-    else if (type === "check") title = "🧪 فحوص الأكواد:";
-    else if (type === "activate") title = "⚡ عمليات التفعيل:";
+    // جدول ترجمة نتائج العمليات إلى العربية
+    const resultLabels = {
+      activated: "مُفعّل",
+      unactivated: "غير مفعّل",
+      failed: "غير صالح",
+      success: "ناجح",
+      error: "خطأ",
+      already_activated: "مُفعّل مسبقًا",
+      invalid_before_activate: "غير صالح",
+      check_error: "خطأ في الفحص"
+    };
 
-    let text = title + "\n\n";
+    let text = "";
+    if (type === "check") text += "🧪 فحوص الأكواد:\n\n";
+    else if (type === "activate") text += "⚡ عمليات التفعيل:\n\n";
+    else if (type === "player") text += "👤 استعلامات اللاعبين:\n\n";
 
     const slice = items.slice(0, 10); // آخر 10 فقط
 
@@ -1022,9 +1032,11 @@ bot.on("callback_query", async (query) => {
       if (type === "player") {
         text += `• ${op.player_name || "-"} (${op.player_id || "-"})\n  في: ${when}\n\n`;
       } else if (type === "check") {
-        text += `• كود: ${op.code || "-"} — (${op.result || "-"})\n  في: ${when}\n\n`;
+        const resultText = resultLabels[op.result] || op.result;
+        text += `• كود: ${op.code || "-"} — (${resultText})\n  في: ${when}\n\n`;
       } else if (type === "activate") {
-        text += `• كود: ${op.code || "-"} — (${op.result || "-"})\n  لاعب: ${op.player_name || "-"} (${op.player_id || "-"})\n  في: ${when}\n\n`;
+        const resultText = resultLabels[op.result] || op.result;
+        text += `• كود: ${op.code || "-"} — (${resultText})\n  لاعب: ${op.player_name || "-"} (${op.player_id || "-"})\n  في: ${when}\n\n`;
       }
     }
 
